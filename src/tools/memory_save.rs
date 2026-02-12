@@ -99,7 +99,7 @@ impl Tool for MemorySaveTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Save a memory to the memory store. This creates a persistent record of information that can be recalled later. Use this to save facts, preferences, decisions, events, observations, and identity information.".to_string(),
+            description: "Save a memory to long-term storage. Memories persist across conversations and can be recalled later via branches.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

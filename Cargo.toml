@@ -31,6 +31,9 @@ redb = "2.4"
 arrow = "54"
 fastembed = "4"
 
+# Encoding
+base64 = "0.22"
+
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -58,7 +58,7 @@ impl Tool for SpawnWorkerTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Spawn a worker to execute a specific task. Workers are independent processes with shell, file, and exec tools. They do NOT have your conversation history — they only see the task description you give them. Use for: file operations, running tests, building code, executing scripts.".to_string(),
+            description: "Spawn an independent worker process with shell, file, and exec tools. The worker only sees the task description you provide — no conversation history.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -69,7 +69,7 @@ impl Tool for SpawnWorkerTool {
                     "interactive": {
                         "type": "boolean",
                         "default": false,
-                        "description": "If true, creates an interactive worker that can receive follow-up messages via route_to_worker."
+                        "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns."
                     }
                 },
                 "required": ["task"]

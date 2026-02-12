@@ -6,8 +6,8 @@ use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use serenity::all::{
-    ChannelId, Context, EditMessage, EventHandler, GatewayIntents, GetMessages, GuildId, Http,
-    Message, MessageId, Ready, ShardManager, UserId,
+    ChannelId, ChannelType, Context, CreateThread, EditMessage, EventHandler, GatewayIntents,
+    GetMessages, GuildId, Http, Message, MessageId, Ready, ShardManager, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -134,6 +134,59 @@ impl Messaging for DiscordAdapter {
                         .say(&*http, &chunk)
                         .await
                         .context("failed to send discord message")?;
+                }
+            }
+            OutboundResponse::ThreadReply { thread_name, text } => {
+                self.stop_typing(&message.id).await;
+
+                // Try to create a public thread from the source message.
+                // Requires the "Create Public Threads" bot permission.
+                let message_id = message
+                    .metadata
+                    .get("discord_message_id")
+                    .and_then(|v| v.as_u64())
+                    .map(MessageId::new);
+
+                let thread_result = match message_id {
+                    Some(source_message_id) => {
+                        let builder = CreateThread::new(&thread_name)
+                            .kind(ChannelType::PublicThread);
+                        channel_id
+                            .create_thread_from_message(&*http, source_message_id, builder)
+                            .await
+                    }
+                    None => {
+                        let builder = CreateThread::new(&thread_name)
+                            .kind(ChannelType::PublicThread);
+                        channel_id.create_thread(&*http, builder).await
+                    }
+                };
+
+                match thread_result {
+                    Ok(thread) => {
+                        for chunk in split_message(&text, 2000) {
+                            thread
+                                .id
+                                .say(&*http, &chunk)
+                                .await
+                                .context("failed to send message in new thread")?;
+                        }
+                    }
+                    Err(error) => {
+                        // Fall back to a regular message if thread creation fails
+                        // (e.g. missing permissions, DM context)
+                        tracing::warn!(
+                            %error,
+                            thread_name = %thread_name,
+                            "failed to create thread, falling back to regular message"
+                        );
+                        for chunk in split_message(&text, 2000) {
+                            channel_id
+                                .say(&*http, &chunk)
+                                .await
+                                .context("failed to send discord message")?;
+                        }
+                    }
                 }
             }
             OutboundResponse::StreamStart => {

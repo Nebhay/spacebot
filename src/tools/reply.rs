@@ -49,6 +49,11 @@ pub struct ReplyError(String);
 pub struct ReplyArgs {
     /// The message content to send to the user.
     pub content: String,
+    /// Optional: create a new thread with this name and reply inside it.
+    /// When set, a public thread is created in the current channel and the
+    /// reply is posted there. Thread names are capped at 100 characters.
+    #[serde(default)]
+    pub thread_name: Option<String>,
 }
 
 /// Output from reply tool.
@@ -69,13 +74,17 @@ impl Tool for ReplyTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Send a reply to the user. This is how you respond to the user's message.".to_string(),
+            description: "Send a message to the user. Optionally create a new thread.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "description": "The content to send to the user. Can be markdown formatted."
+                    },
+                    "thread_name": {
+                        "type": "string",
+                        "description": "If provided, creates a new public thread with this name and posts the reply inside it. Max 100 characters."
                     }
                 },
                 "required": ["content"]
@@ -87,12 +96,27 @@ impl Tool for ReplyTool {
         tracing::info!(
             conversation_id = %self.conversation_id,
             content_len = args.content.len(),
+            thread_name = args.thread_name.as_deref(),
             "reply tool called"
         );
 
         self.conversation_logger.log_bot_message(&self.channel_id, &args.content);
 
-        let response = OutboundResponse::Text(args.content.clone());
+        let response = match args.thread_name {
+            Some(ref name) => {
+                // Cap thread names at 100 characters (Discord limit)
+                let thread_name = if name.len() > 100 {
+                    name[..100].to_string()
+                } else {
+                    name.clone()
+                };
+                OutboundResponse::ThreadReply {
+                    thread_name,
+                    text: args.content.clone(),
+                }
+            }
+            None => OutboundResponse::Text(args.content.clone()),
+        };
 
         self.response_tx
             .send(response)

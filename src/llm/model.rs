@@ -7,7 +7,8 @@ use rig::completion::{
     self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
 };
 use rig::message::{
-    AssistantContent, Message, Text, ToolCall, ToolFunction, ToolResult, UserContent,
+    AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
+    ToolResult, UserContent,
 };
 use rig::one_or_many::OneOrMany;
 use rig::streaming::StreamingCompletionResponse;
@@ -457,6 +458,7 @@ fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde_jso
                         UserContent::Text(t) => {
                             Some(serde_json::json!({"type": "text", "text": t.text}))
                         }
+                        UserContent::Image(image) => convert_image_anthropic(image),
                         UserContent::ToolResult(result) => Some(serde_json::json!({
                             "type": "tool_result",
                             "tool_use_id": result.id,
@@ -495,16 +497,25 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
     for message in messages.iter() {
         match message {
             Message::User { content } => {
+                // Separate tool results (they need their own messages) from content parts
+                let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                let mut tool_results: Vec<serde_json::Value> = Vec::new();
+
                 for item in content.iter() {
                     match item {
                         UserContent::Text(t) => {
-                            result.push(serde_json::json!({
-                                "role": "user",
-                                "content": t.text,
+                            content_parts.push(serde_json::json!({
+                                "type": "text",
+                                "text": t.text,
                             }));
                         }
+                        UserContent::Image(image) => {
+                            if let Some(part) = convert_image_openai(image) {
+                                content_parts.push(part);
+                            }
+                        }
                         UserContent::ToolResult(tr) => {
-                            result.push(serde_json::json!({
+                            tool_results.push(serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": tr.id,
                                 "content": tool_result_content_to_string(&tr.content),
@@ -513,6 +524,24 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                         _ => {}
                     }
                 }
+
+                if !content_parts.is_empty() {
+                    // If there's only one text part and no images, use simple string format
+                    if content_parts.len() == 1 && content_parts[0]["type"] == "text" {
+                        result.push(serde_json::json!({
+                            "role": "user",
+                            "content": content_parts[0]["text"],
+                        }));
+                    } else {
+                        // Mixed content (text + images): use array-of-parts format
+                        result.push(serde_json::json!({
+                            "role": "user",
+                            "content": content_parts,
+                        }));
+                    }
+                }
+
+                result.extend(tool_results);
             }
             Message::Assistant { content, .. } => {
                 let mut text_parts = Vec::new();
@@ -553,6 +582,62 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
     }
 
     result
+}
+
+// --- Image conversion helpers ---
+
+/// Convert a rig Image to an Anthropic image content block.
+/// Anthropic format: {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "..."}}
+fn convert_image_anthropic(image: &Image) -> Option<serde_json::Value> {
+    let media_type = image
+        .media_type
+        .as_ref()
+        .map(|mt| mt.to_mime_type())
+        .unwrap_or("image/jpeg");
+
+    match &image.data {
+        DocumentSourceKind::Base64(data) => Some(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }
+        })),
+        DocumentSourceKind::Url(url) => Some(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url,
+            }
+        })),
+        _ => None,
+    }
+}
+
+/// Convert a rig Image to an OpenAI image_url content part.
+/// OpenAI/OpenRouter format: {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+fn convert_image_openai(image: &Image) -> Option<serde_json::Value> {
+    let media_type = image
+        .media_type
+        .as_ref()
+        .map(|mt| mt.to_mime_type())
+        .unwrap_or("image/jpeg");
+
+    match &image.data {
+        DocumentSourceKind::Base64(data) => {
+            let data_url = format!("data:{media_type};base64,{data}");
+            Some(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": data_url }
+            }))
+        }
+        DocumentSourceKind::Url(url) => Some(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": url }
+        })),
+        _ => None,
+    }
 }
 
 // --- Response parsing ---

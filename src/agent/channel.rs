@@ -12,6 +12,8 @@ use crate::agent::worker::Worker;
 use crate::agent::branch::Branch;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
+use rig::message::{ImageMediaType, MimeType, UserContent};
+use rig::one_or_many::OneOrMany;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast;
@@ -204,13 +206,22 @@ impl Channel {
             self.conversation_id = Some(message.conversation_id.clone());
         }
         
-        let raw_text = match &message.content {
-            crate::MessageContent::Text(text) => text.clone(),
-            crate::MessageContent::Media { text, .. } => text.clone().unwrap_or_default(),
+        let (raw_text, attachments) = match &message.content {
+            crate::MessageContent::Text(text) => (text.clone(), Vec::new()),
+            crate::MessageContent::Media { text, attachments } => {
+                (text.clone().unwrap_or_default(), attachments.clone())
+            }
         };
 
         // Format the user text with sender attribution so the LLM knows who's talking
         let user_text = format_user_message(&raw_text, &message);
+
+        // Download and process attachments into LLM-ready content
+        let attachment_content = if !attachments.is_empty() {
+            download_attachments(&self.deps, &attachments).await
+        } else {
+            Vec::new()
+        };
 
         // Persist user messages (skip system re-triggers)
         if message.source != "system" {
@@ -278,6 +289,16 @@ impl Channel {
         // Signal typing indicator before the LLM starts generating
         let _ = self.response_tx.send(OutboundResponse::Status(crate::StatusUpdate::Thinking)).await;
 
+        // If there are attachments, inject them into history as a user message before the prompt.
+        // The LLM will see the images/files followed by the user's text message.
+        if !attachment_content.is_empty() {
+            let mut history = self.state.history.write().await;
+            let content = OneOrMany::many(attachment_content)
+                .unwrap_or_else(|_| OneOrMany::one(UserContent::text("[attachment processing failed]")));
+            history.push(rig::message::Message::User { content });
+            drop(history);
+        }
+
         // Run the agent loop with the channel's persistent history
         let mut history = self.state.history.write().await;
         let result = agent.prompt(&user_text)
@@ -326,6 +347,11 @@ impl Channel {
     
     /// Handle a process event (branch results, worker completions, status updates).
     async fn handle_event(&self, event: ProcessEvent) -> Result<()> {
+        // Only process events targeted at this channel
+        if !event_is_for_channel(&event, &self.id) {
+            return Ok(());
+        }
+
         // Update status block
         {
             let mut status = self.state.status_block.write().await;
@@ -557,4 +583,132 @@ fn build_conversation_context(message: &InboundMessage) -> String {
     lines.push("Multiple users may be present. Each message is prefixed with [username].".into());
 
     lines.join("\n")
+}
+
+/// Check if a ProcessEvent is targeted at a specific channel.
+///
+/// Events from branches and workers carry a channel_id. We only process events
+/// that originated from this channel — otherwise broadcast events from one
+/// channel's workers would leak into sibling channels (e.g. threads).
+fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
+    match event {
+        ProcessEvent::BranchResult { channel_id: event_channel, .. } => {
+            event_channel == channel_id
+        }
+        ProcessEvent::WorkerComplete { channel_id: event_channel, .. } => {
+            event_channel.as_ref() == Some(channel_id)
+        }
+        ProcessEvent::WorkerStatus { channel_id: event_channel, .. } => {
+            event_channel.as_ref() == Some(channel_id)
+        }
+        // Status block updates, tool events, etc. — match on agent_id which
+        // is already filtered by the event bus subscription. Let them through.
+        _ => true,
+    }
+}
+
+/// Image MIME types we support for vision.
+const IMAGE_MIME_PREFIXES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Text-based MIME types where we inline the content.
+const TEXT_MIME_PREFIXES: &[&str] = &[
+    "text/", "application/json", "application/xml", "application/javascript",
+    "application/typescript", "application/toml", "application/yaml",
+];
+
+/// Download attachments and convert them to LLM-ready UserContent parts.
+///
+/// Images become `UserContent::Image` (base64). Text files get inlined.
+/// Other file types get a metadata-only description.
+async fn download_attachments(
+    deps: &AgentDeps,
+    attachments: &[crate::Attachment],
+) -> Vec<UserContent> {
+    let http = deps.llm_manager.http_client();
+    let mut parts = Vec::new();
+
+    for attachment in attachments {
+        let is_image = IMAGE_MIME_PREFIXES.iter().any(|p| attachment.mime_type.starts_with(p));
+        let is_text = TEXT_MIME_PREFIXES.iter().any(|p| attachment.mime_type.starts_with(p));
+
+        if is_image {
+            match http.get(&attachment.url).send().await {
+                Ok(response) => {
+                    match response.bytes().await {
+                        Ok(bytes) => {
+                            use base64::Engine as _;
+                            let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let media_type = ImageMediaType::from_mime_type(&attachment.mime_type);
+                            parts.push(UserContent::image_base64(base64_data, media_type, None));
+                            tracing::info!(
+                                filename = %attachment.filename,
+                                mime = %attachment.mime_type,
+                                size = bytes.len(),
+                                "downloaded image attachment"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, filename = %attachment.filename, "failed to read attachment bytes");
+                            parts.push(UserContent::text(format!(
+                                "[Failed to download image: {}]", attachment.filename
+                            )));
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, filename = %attachment.filename, "failed to download attachment");
+                    parts.push(UserContent::text(format!(
+                        "[Failed to download image: {}]", attachment.filename
+                    )));
+                }
+            }
+        } else if is_text {
+            match http.get(&attachment.url).send().await {
+                Ok(response) => {
+                    match response.text().await {
+                        Ok(content) => {
+                            // Truncate very large files to avoid blowing up context
+                            let truncated = if content.len() > 50_000 {
+                                format!("{}...\n[truncated — {} bytes total]", &content[..50_000], content.len())
+                            } else {
+                                content
+                            };
+                            parts.push(UserContent::text(format!(
+                                "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
+                                attachment.filename, attachment.mime_type, truncated
+                            )));
+                            tracing::info!(
+                                filename = %attachment.filename,
+                                mime = %attachment.mime_type,
+                                "downloaded text attachment"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, filename = %attachment.filename, "failed to read text attachment");
+                            parts.push(UserContent::text(format!(
+                                "[Failed to read file: {}]", attachment.filename
+                            )));
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, filename = %attachment.filename, "failed to download text attachment");
+                    parts.push(UserContent::text(format!(
+                        "[Failed to download file: {}]", attachment.filename
+                    )));
+                }
+            }
+        } else {
+            // Unknown file type — just describe it
+            let size_str = attachment.size_bytes
+                .map(|s| format!("{:.1} KB", s as f64 / 1024.0))
+                .unwrap_or_else(|| "unknown size".into());
+            parts.push(UserContent::text(format!(
+                "[Attachment: {} ({}, {})]",
+                attachment.filename, attachment.mime_type, size_str
+            )));
+        }
+    }
+
+    parts
 }

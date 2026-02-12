@@ -206,6 +206,12 @@ pub struct Attachment {
 #[serde(rename_all = "snake_case")]
 pub enum OutboundResponse {
     Text(String),
+    /// Create a new thread and send a reply in it. On platforms that don't
+    /// support threads this falls back to a regular text message.
+    ThreadReply {
+        thread_name: String,
+        text: String,
+    },
     StreamStart,
     StreamChunk(String),
     StreamEnd,

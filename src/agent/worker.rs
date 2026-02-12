@@ -1,5 +1,6 @@
 //! Worker: Independent task execution process.
 
+use crate::agent::compactor::{estimate_history_tokens, CompactionAction};
 use crate::error::Result;
 use crate::llm::SpacebotModel;
 use crate::{WorkerId, ChannelId, ProcessId, ProcessType, AgentDeps};
@@ -8,6 +9,12 @@ use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
+
+/// How many turns per segment before we check context and potentially compact.
+const TURNS_PER_SEGMENT: usize = 25;
+
+/// Total max segments before we give up (25 * 4 = 100 turns max).
+const MAX_SEGMENTS: usize = 4;
 
 /// Worker state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,9 +130,10 @@ impl Worker {
     
     /// Run the worker's LLM agent loop until completion.
     ///
-    /// Creates a per-worker ToolServer with shell, file, exec, and set_status tools.
-    /// For fire-and-forget workers, runs once and returns. For interactive workers,
-    /// waits for follow-up messages on input_rx and runs additional turns.
+    /// Runs in segments of 25 turns. After each segment, checks context usage
+    /// and compacts if the worker is approaching the context window limit.
+    /// This prevents long-running workers from dying mid-task due to context
+    /// exhaustion.
     pub async fn run(mut self) -> Result<String> {
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
@@ -146,39 +154,66 @@ impl Worker {
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
-            .default_max_turns(100)
+            .default_max_turns(TURNS_PER_SEGMENT)
             .tool_server_handle(worker_tool_server)
             .build();
 
         // Fresh history for the worker (no channel context)
         let mut history = Vec::new();
 
-        // Run the initial task
-        let result = match agent.prompt(&self.task)
-            .with_history(&mut history)
-            .with_hook(self.hook.clone())
-            .await
-        {
-            Ok(response) => response,
-            Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                self.state = WorkerState::Done;
-                self.hook.send_status("completed (hit turn limit)");
-                let partial = extract_last_assistant_text(&history)
-                    .unwrap_or_else(|| "Worker exhausted its turns.".into());
-                tracing::warn!(worker_id = %self.id, "worker hit max turns");
-                return Ok(partial);
-            }
-            Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
-                self.state = WorkerState::Failed;
-                self.hook.send_status("cancelled");
-                tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
-                return Ok(format!("Worker cancelled: {reason}"));
-            }
-            Err(error) => {
-                self.state = WorkerState::Failed;
-                self.hook.send_status("failed");
-                tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
-                return Err(crate::error::AgentError::Other(error.into()).into());
+        // Run the initial task in segments with compaction checkpoints
+        let mut prompt = self.task.clone();
+        let mut segments_run = 0;
+
+        let result = loop {
+            segments_run += 1;
+
+            match agent.prompt(&prompt)
+                .with_history(&mut history)
+                .with_hook(self.hook.clone())
+                .await
+            {
+                Ok(response) => {
+                    // LLM produced final text — task is done
+                    break response;
+                }
+                Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                    // Hit turn limit for this segment — still working
+                    if segments_run >= MAX_SEGMENTS {
+                        self.state = WorkerState::Done;
+                        self.hook.send_status("completed (hit turn limit)");
+                        let partial = extract_last_assistant_text(&history)
+                            .unwrap_or_else(|| "Worker exhausted its turns.".into());
+                        tracing::warn!(worker_id = %self.id, segments = segments_run, "worker hit max segments");
+                        return Ok(partial);
+                    }
+
+                    // Check context size and compact if needed
+                    self.maybe_compact_history(&mut history).await;
+
+                    // Continue with a follow-up prompt
+                    prompt = "Continue where you left off. Do not repeat completed work.".into();
+                    self.hook.send_status(&format!("working (segment {segments_run})"));
+
+                    tracing::debug!(
+                        worker_id = %self.id,
+                        segment = segments_run,
+                        history_len = history.len(),
+                        "continuing to next segment"
+                    );
+                }
+                Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
+                    self.state = WorkerState::Failed;
+                    self.hook.send_status("cancelled");
+                    tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
+                    return Ok(format!("Worker cancelled: {reason}"));
+                }
+                Err(error) => {
+                    self.state = WorkerState::Failed;
+                    self.hook.send_status("failed");
+                    tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
+                    return Err(crate::error::AgentError::Other(error.into()).into());
+                }
             }
         };
 
@@ -190,6 +225,9 @@ impl Worker {
             while let Some(follow_up) = input_rx.recv().await {
                 self.state = WorkerState::Running;
                 self.hook.send_status("processing follow-up");
+
+                // Compact before follow-up if needed
+                self.maybe_compact_history(&mut history).await;
 
                 match agent.prompt(&follow_up)
                     .with_history(&mut history)
@@ -211,26 +249,50 @@ impl Worker {
         }
 
         self.state = WorkerState::Done;
-        self.hook.send_status("summarizing");
-
-        // Summary phase: ask the worker to produce a concise result for the channel.
-        // The full tool history is in `history` so the LLM can reference everything.
-        // Single turn, no tools — just text.
-        let summary = match agent.prompt(SUMMARY_PROMPT)
-            .with_history(&mut history)
-            .max_turns(1)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(worker_id = %self.id, %error, "summary phase failed, using raw result");
-                result
-            }
-        };
-
         self.hook.send_status("completed");
+        
         tracing::info!(worker_id = %self.id, "worker completed");
-        Ok(summary)
+        Ok(result)
+    }
+
+    /// Check context usage and compact history if approaching the limit.
+    ///
+    /// Workers don't have a full Compactor instance — they do inline compaction
+    /// by summarizing older tool calls and results into a condensed recap.
+    /// No LLM call, just programmatic truncation with a summary marker.
+    async fn maybe_compact_history(&self, history: &mut Vec<rig::message::Message>) {
+        let context_window = 128_000; // TODO: pull from config
+        let estimated = estimate_history_tokens(history);
+        let usage = estimated as f32 / context_window as f32;
+
+        if usage < 0.70 {
+            return;
+        }
+
+        let total = history.len();
+        if total <= 4 {
+            return;
+        }
+
+        // Remove the oldest 50% of messages and replace with a summary marker
+        let remove_count = total / 2;
+        let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
+
+        // Build a brief recap of what was removed
+        let recap = build_worker_recap(&removed);
+        let marker = format!(
+            "[System: Earlier work has been summarized to free up context. \
+             {remove_count} messages compacted.]\n\n## Work completed so far:\n{recap}"
+        );
+        history.insert(0, rig::message::Message::from(marker));
+
+        tracing::info!(
+            worker_id = %self.id,
+            removed = remove_count,
+            remaining = history.len(),
+            usage = %format!("{:.0}%", usage * 100.0),
+            "worker history compacted"
+        );
     }
     
     /// Check if worker is in a terminal state.
@@ -244,13 +306,64 @@ impl Worker {
     }
 }
 
-/// Prompt sent after the task phase to get a concise summary for the channel.
-const SUMMARY_PROMPT: &str = "\
-Your task is complete. Now produce a concise summary of the result for the channel \
-that spawned you. The channel has limited context — do not dump raw file contents or \
-full command output. Instead, summarize what you did, what you found, and any key \
-details the channel needs. If the task was to retrieve specific information, include \
-the relevant parts — not the entire output. Keep it focused and useful. Do not use tools.";
+/// Build a brief recap of removed worker history for the compaction marker.
+///
+/// Extracts tool call names and their results (truncated) so the worker
+/// knows what it already did without carrying the full history.
+fn build_worker_recap(messages: &[rig::message::Message]) -> String {
+    let mut recap = String::new();
+    
+    for message in messages {
+        match message {
+            rig::message::Message::Assistant { content, .. } => {
+                for item in content.iter() {
+                    if let rig::message::AssistantContent::ToolCall(tc) = item {
+                        recap.push_str(&format!("- Called `{}` ", tc.function.name));
+                        // Include truncated args for context
+                        let args = tc.function.arguments.to_string();
+                        if args.len() > 100 {
+                            recap.push_str(&format!("({}...)\n", &args[..100]));
+                        } else {
+                            recap.push_str(&format!("({args})\n"));
+                        }
+                    }
+                    if let rig::message::AssistantContent::Text(t) = item {
+                        if !t.text.is_empty() {
+                            let text = if t.text.len() > 200 {
+                                format!("{}...", &t.text[..200])
+                            } else {
+                                t.text.clone()
+                            };
+                            recap.push_str(&format!("- Noted: {text}\n"));
+                        }
+                    }
+                }
+            }
+            rig::message::Message::User { content } => {
+                for item in content.iter() {
+                    if let rig::message::UserContent::ToolResult(tr) = item {
+                        for c in tr.content.iter() {
+                            if let rig::message::ToolResultContent::Text(t) = c {
+                                let result = if t.text.len() > 150 {
+                                    format!("{}...", &t.text[..150])
+                                } else {
+                                    t.text.clone()
+                                };
+                                recap.push_str(&format!("  Result: {result}\n"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if recap.is_empty() {
+        "No significant actions recorded in compacted history.".into()
+    } else {
+        recap
+    }
+}
 
 /// Extract the last assistant text message from a history.
 fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {

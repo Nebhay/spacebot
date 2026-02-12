@@ -53,7 +53,7 @@ impl Tool for BranchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Fork a branch to think independently about a problem. A branch is a separate process that has a clone of your current conversation history and can use tools like memory_recall and spawn_worker. The branch will think through the problem and return a conclusion. Use this when you need to think deeply about something without blocking the conversation.".to_string(),
+            description: "Fork a branch to think independently. The branch gets a clone of your current conversation history and has access to memory_recall and memory_save tools. It runs independently and returns a conclusion.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -55,7 +55,7 @@ impl Tool for RouteTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Send a follow-up message to an active interactive worker. Use this to continue a conversation with a long-running worker (like a coding session) without creating a new worker.".to_string(),
+            description: "Send a follow-up message to an active interactive worker.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

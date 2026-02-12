@@ -26,6 +26,8 @@ Under "OAuth2" > "URL Generator":
 - Scopes: `bot`
 - Bot Permissions:
   - Send Messages
+  - Send Messages in Threads
+  - Create Public Threads
   - Read Message History
   - Embed Links (for future media support)
   - Attach Files (for future media support)
