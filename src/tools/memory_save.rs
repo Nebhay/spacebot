@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+
 /// Tool for saving memories to the store.
 #[derive(Debug, Clone)]
 pub struct MemorySaveTool {
@@ -45,6 +46,8 @@ pub struct MemorySaveArgs {
     pub importance: Option<f32>,
     /// Optional source information (e.g., "user", "system", "inferred").
     pub source: Option<String>,
+    /// Optional channel ID to associate this memory with the conversation it came from.
+    pub channel_id: Option<String>,
     /// Optional associations to create with other memories.
     #[serde(default)]
     pub associations: Vec<AssociationInput>,
@@ -119,6 +122,10 @@ impl Tool for MemorySaveTool {
                         "type": "string",
                         "description": "Optional source of the information (e.g., 'user stated', 'inferred', 'system')"
                     },
+                    "channel_id": {
+                        "type": "string",
+                        "description": "Optional channel ID to associate this memory with the conversation it came from"
+                    },
                     "associations": {
                         "type": "array",
                         "description": "Optional associations to link this memory to other memories",
@@ -162,7 +169,6 @@ impl Tool for MemorySaveTool {
             _ => MemoryType::Fact,
         };
 
-        // Create the memory
         let mut memory = Memory::new(&args.content, memory_type);
 
         if let Some(importance) = args.importance {
@@ -171,6 +177,10 @@ impl Tool for MemorySaveTool {
 
         if let Some(source) = args.source {
             memory = memory.with_source(source);
+        }
+
+        if let Some(channel_id) = args.channel_id {
+            memory = memory.with_channel_id(Arc::from(channel_id.as_str()));
         }
 
         // Save to SQLite database
@@ -223,7 +233,7 @@ impl Tool for MemorySaveTool {
 pub async fn save_fact(
     memory_search: Arc<MemorySearch>,
     content: impl Into<String>,
-    _channel_id: Option<crate::ChannelId>,
+    channel_id: Option<crate::ChannelId>,
 ) -> Result<String> {
     let tool = MemorySaveTool::new(memory_search);
     let args = MemorySaveArgs {
@@ -231,6 +241,7 @@ pub async fn save_fact(
         memory_type: "fact".to_string(),
         importance: None,
         source: None,
+        channel_id: channel_id.map(|id| id.to_string()),
         associations: vec![],
     };
 
