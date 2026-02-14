@@ -1,9 +1,21 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api, type CortexEvent, type CronJobInfo, MEMORY_TYPES } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { formatTimeAgo, formatDuration } from "@/lib/format";
+import {
+	ResponsiveContainer,
+	AreaChart,
+	Area,
+	XAxis,
+	YAxis,
+	CartesianGrid,
+	Tooltip,
+	PieChart,
+	Pie,
+	Cell,
+} from "recharts";
 
 interface AgentDetailProps {
 	agentId: string;
@@ -70,31 +82,100 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 		);
 	}
 
+	const hasLiveActivity = activity.workers > 0 || activity.branches > 0 || activity.typing > 0;
+
 	return (
-		<div className="h-full overflow-y-auto p-6">
-			<div className="mx-auto flex max-w-5xl flex-col gap-6">
-				{/* Live Activity */}
-				<LiveActivitySection
+		<div className="h-full overflow-y-auto">
+			<div className="mx-auto max-w-6xl p-6 pb-24">
+				{/* Hero Section */}
+				<HeroSection
 					agentId={agentId}
 					channelCount={agentChannels.length}
 					workers={activity.workers}
 					branches={activity.branches}
-					typing={activity.typing}
-					liveStates={liveStates}
-					channels={agentChannels}
+					hasLiveActivity={hasLiveActivity}
 				/>
 
-				{/* Memory Stats */}
-				{overviewData && (
-					<MemorySection
-						agentId={agentId}
-						total={overviewData.memory_total}
-						counts={overviewData.memory_counts}
-					/>
+				{/* Bulletin - the most important text */}
+				{overviewData?.latest_bulletin && (
+					<BulletinSection bulletin={overviewData.latest_bulletin} />
 				)}
 
-				{/* Model Routing */}
-				{configData && <RoutingSection config={configData} />}
+				{/* Charts Grid */}
+				{overviewData && (
+					<div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
+						{/* Memory Growth Chart */}
+						<div className="col-span-1 lg:col-span-2 rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4 flex items-center justify-between">
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory Growth</h3>
+								<span className="text-tiny text-ink-faint">Last 30 days</span>
+							</div>
+							<MemoryGrowthChart data={overviewData.memory_daily} />
+						</div>
+
+						{/* Activity Heatmap */}
+						<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4 flex items-center justify-between">
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Activity Heatmap</h3>
+								<span className="text-tiny text-ink-faint">Messages by day/hour</span>
+							</div>
+							<ActivityHeatmap data={overviewData.activity_heatmap} />
+						</div>
+
+						{/* Process Activity Chart */}
+						<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4 flex items-center justify-between">
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Process Activity</h3>
+								<span className="text-tiny text-ink-faint">Branches + Workers</span>
+							</div>
+							<ProcessActivityChart data={overviewData.activity_daily} />
+						</div>
+					</div>
+				)}
+
+				{/* Secondary Grid */}
+				{overviewData && (
+					<div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+						{/* Memory Donut */}
+						<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4 flex items-center justify-between">
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory Types</h3>
+								<span className="text-2xl font-medium tabular-nums text-ink">{overviewData.memory_total}</span>
+							</div>
+							<MemoryDonut counts={overviewData.memory_counts} />
+						</div>
+
+						{/* Model Routing */}
+						{configData && (
+							<div className="rounded-xl bg-app-darkBox p-5">
+								<div className="mb-4 flex items-center justify-between">
+									<h3 className="font-plex text-sm font-medium text-ink-dull">Model Routing</h3>
+									<Link
+										to="/agents/$agentId/config"
+										params={{ agentId }}
+										className="text-tiny text-accent hover:text-accent/80"
+									>
+										Edit
+									</Link>
+								</div>
+								<ModelRoutingList config={configData} />
+							</div>
+						)}
+
+						{/* Quick Stats */}
+						<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4">
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Configuration</h3>
+							</div>
+							<div className="flex flex-col gap-3">
+								<StatRow label="Context Window" value={agent.context_window.toLocaleString()} />
+								<StatRow label="Max Turns" value={String(agent.max_turns)} />
+								<StatRow label="Max Branches" value={String(agent.max_concurrent_branches)} />
+								<StatRow label="Workspace" value={agent.workspace} truncate />
+							</div>
+						</div>
+					</div>
+				)}
 
 				{/* Identity Preview */}
 				{identityData && <IdentitySection agentId={agentId} identity={identityData} />}
@@ -104,17 +185,14 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 					<CronSection agentId={agentId} jobs={overviewData.cron_jobs} />
 				)}
 
-				{/* Cortex Status */}
-				{overviewData && (
-					<CortexStatusSection
+				{/* Recent Cortex Events */}
+				{overviewData && overviewData.recent_cortex_events.length > 0 && (
+					<CortexEventsSection
 						agentId={agentId}
+						events={overviewData.recent_cortex_events}
 						lastBulletinAt={overviewData.last_bulletin_at}
-						recentEvents={overviewData.recent_cortex_events}
 					/>
 				)}
-
-				{/* Configuration */}
-				<ConfigSection agent={agent} />
 			</div>
 		</div>
 	);
@@ -122,259 +200,406 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 
 // -- Section Components --
 
-function SectionHeader({ title, action }: { title: string; action?: React.ReactNode }) {
-	return (
-		<div className="flex items-center justify-between">
-			<h2 className="font-plex text-sm font-medium text-ink-dull">{title}</h2>
-			{action}
-		</div>
-	);
-}
-
-function StatCard({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color?: string }) {
-	return (
-		<div className="rounded-md bg-app-darkBox px-3 py-2">
-			<span className="text-tiny text-ink-faint">{label}</span>
-			<p className={`mt-0.5 text-lg font-medium tabular-nums ${color ?? "text-ink"}`}>
-				{value}
-			</p>
-			{sub && <span className="text-tiny text-ink-faint">{sub}</span>}
-		</div>
-	);
-}
-
-// -- Live Activity --
-
-function LiveActivitySection({
+function HeroSection({
 	agentId,
 	channelCount,
 	workers,
 	branches,
-	typing,
-	liveStates,
-	channels,
+	hasLiveActivity,
 }: {
 	agentId: string;
 	channelCount: number;
 	workers: number;
 	branches: number;
-	typing: number;
-	liveStates: Record<string, ChannelLiveState>;
-	channels: { id: string; display_name: string | null; platform: string }[];
+	hasLiveActivity: boolean;
 }) {
-	// Collect active workers/branches across channels for detail display
-	const activeWorkers = useMemo(() => {
-		const result: { channelName: string; worker: ChannelLiveState["workers"][string] }[] = [];
-		for (const channel of channels) {
-			const live = liveStates[channel.id];
-			if (!live) continue;
-			for (const worker of Object.values(live.workers)) {
-				result.push({ channelName: channel.display_name ?? channel.id, worker });
-			}
-		}
-		return result;
-	}, [channels, liveStates]);
-
-	const activeBranches = useMemo(() => {
-		const result: { channelName: string; branch: ChannelLiveState["branches"][string] }[] = [];
-		for (const channel of channels) {
-			const live = liveStates[channel.id];
-			if (!live) continue;
-			for (const branch of Object.values(live.branches)) {
-				result.push({ channelName: channel.display_name ?? channel.id, branch });
-			}
-		}
-		return result;
-	}, [channels, liveStates]);
-
 	return (
-		<section>
-			<SectionHeader
-				title="Activity"
-				action={
-					<Link
-						to="/agents/$agentId/channels"
-						params={{ agentId }}
-						className="text-tiny text-accent hover:text-accent/80"
-					>
-						View channels
-					</Link>
-				}
-			/>
-			<div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-				<StatCard label="Channels" value={channelCount} />
-				<StatCard
-					label="Workers"
-					value={workers}
-					color={workers > 0 ? "text-amber-400" : undefined}
-				/>
-				<StatCard
-					label="Branches"
-					value={branches}
-					color={branches > 0 ? "text-violet-400" : undefined}
-				/>
-				<StatCard
-					label="Typing"
-					value={typing}
-					color={typing > 0 ? "text-accent" : undefined}
-				/>
+		<div className="flex flex-col gap-4 border-b border-app-line pb-6">
+			<div className="flex items-start justify-between">
+				<div>
+					<h1 className="font-plex text-3xl font-semibold text-ink">{agentId}</h1>
+					<div className="mt-2 flex items-center gap-4 text-sm">
+						<div className="flex items-center gap-2">
+							<div className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-amber-400" : "bg-green-500"}`} />
+							<span className="text-ink-dull">{hasLiveActivity ? "Active" : "Idle"}</span>
+						</div>
+						<Link
+							to="/agents/$agentId/channels"
+							params={{ agentId }}
+							className="text-accent hover:text-accent/80"
+						>
+							{channelCount} channel{channelCount !== 1 ? "s" : ""}
+						</Link>
+					</div>
+				</div>
 			</div>
 
-			{/* Active process details */}
-			{(activeWorkers.length > 0 || activeBranches.length > 0) && (
-				<div className="mt-3 flex flex-col gap-1.5">
-					{activeWorkers.map(({ channelName, worker }) => (
-						<div
-							key={worker.id}
-							className="flex items-center gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm"
-						>
-							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-							<span className="font-medium text-amber-300">Worker</span>
-							<span className="truncate text-ink-dull">{worker.task}</span>
-							<span className="ml-auto text-tiny text-ink-faint">{channelName}</span>
-							{worker.currentTool && (
-								<span className="text-tiny text-amber-400/70">{worker.currentTool}</span>
-							)}
+			{(workers > 0 || branches > 0) && (
+				<div className="flex flex-wrap gap-2">
+					{workers > 0 && (
+						<div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+							<span className="font-medium text-amber-400">{workers} worker{workers !== 1 ? "s" : ""}</span>
 						</div>
-					))}
-					{activeBranches.map(({ channelName, branch }) => (
-						<div
-							key={branch.id}
-							className="flex items-center gap-2 rounded-md bg-violet-500/10 px-3 py-2 text-sm"
-						>
-							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-							<span className="font-medium text-violet-300">Branch</span>
-							<span className="truncate text-ink-dull">{branch.description}</span>
-							<span className="ml-auto text-tiny text-ink-faint">{channelName}</span>
-							{(branch.currentTool ?? branch.lastTool) && (
-								<span className="text-tiny text-violet-400/70">
-									{branch.currentTool ?? branch.lastTool}
-								</span>
-							)}
+					)}
+					{branches > 0 && (
+						<div className="flex items-center gap-2 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
+							<span className="font-medium text-violet-400">{branches} branch{branches !== 1 ? "es" : ""}</span>
 						</div>
-					))}
+					)}
 				</div>
 			)}
-		</section>
+		</div>
 	);
 }
 
-// -- Memory Stats --
+function BulletinSection({ bulletin }: { bulletin: string }) {
+	const [expanded, setExpanded] = useState(false);
+	const lines = bulletin.split("\n");
+	const shouldTruncate = lines.length > 6;
+	const displayText = expanded || !shouldTruncate ? bulletin : lines.slice(0, 6).join("\n") + "\n...";
 
-const MEMORY_TYPE_COLORS: Record<string, string> = {
-	fact: "bg-blue-500",
-	preference: "bg-pink-500",
-	decision: "bg-amber-500",
-	identity: "bg-green-500",
-	event: "bg-cyan-500",
-	observation: "bg-purple-500",
-	goal: "bg-orange-500",
-	todo: "bg-red-500",
+	return (
+		<div className="mt-6 rounded-xl border border-accent/20 bg-accent/5 p-5">
+			<div className="mb-3 flex items-center gap-2">
+				<div className="h-2 w-2 rounded-full bg-accent" />
+				<h3 className="font-plex text-sm font-medium text-accent">Latest Memory Bulletin</h3>
+			</div>
+			<div className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
+				{displayText}
+			</div>
+			{shouldTruncate && (
+				<button
+					onClick={() => setExpanded(!expanded)}
+					className="mt-3 text-tiny text-accent hover:text-accent/80"
+				>
+					{expanded ? "Show less" : "Show more"}
+				</button>
+			)}
+		</div>
+	);
+}
+
+// -- Charts --
+
+const CHART_COLORS = {
+	grid: "#2a2a3a",
+	axis: "#4a4a5a",
+	tick: "#8a8a9a",
+	accent: "#6366f1", // indigo
+	amber: "#f59e0b",
+	violet: "#8b5cf6",
+	green: "#10b981",
+	blue: "#3b82f6",
+	tooltip: {
+		bg: "#1a1a2e",
+		border: "#2a2a3a",
+		text: "#e0e0e0",
+	},
 };
 
-function MemorySection({
-	agentId,
-	total,
-	counts,
-}: {
-	agentId: string;
-	total: number;
-	counts: Record<string, number>;
-}) {
+const MEMORY_TYPE_COLORS = [
+	"#3b82f6", // fact - blue
+	"#ec4899", // preference - pink
+	"#f59e0b", // decision - amber
+	"#10b981", // identity - green
+	"#06b6d4", // event - cyan
+	"#8b5cf6", // observation - purple
+	"#f97316", // goal - orange
+	"#ef4444", // todo - red
+];
+
+function MemoryGrowthChart({ data }: { data: { date: string; count: number }[] }) {
+	if (data.length === 0) {
+		return <div className="h-48 flex items-center justify-center text-ink-faint text-sm">No data</div>;
+	}
+
+	// Calculate cumulative for area effect
+	let cumulative = 0;
+	const chartData = data.map((d) => {
+		cumulative += d.count;
+		return {
+			date: new Date(d.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+			daily: d.count,
+			total: cumulative,
+		};
+	});
+
 	return (
-		<section>
-			<SectionHeader
-				title="Memory"
-				action={
-					<Link
-						to="/agents/$agentId/memories"
-						params={{ agentId }}
-						className="text-tiny text-accent hover:text-accent/80"
-					>
-						View all
-					</Link>
-				}
-			/>
-			<div className="mt-3 rounded-md bg-app-darkBox p-3">
-				<div className="flex items-baseline gap-2">
-					<span className="text-2xl font-medium tabular-nums text-ink">{total}</span>
-					<span className="text-sm text-ink-faint">total memories</span>
-				</div>
-
-				{/* Type breakdown bar */}
-				{total > 0 && (
-					<div className="mt-3 flex h-2 overflow-hidden rounded-full bg-app-box">
-						{MEMORY_TYPES.map((type) => {
-							const count = counts[type] ?? 0;
-							if (count === 0) return null;
-							const pct = (count / total) * 100;
-							return (
-								<div
-									key={type}
-									className={`${MEMORY_TYPE_COLORS[type] ?? "bg-gray-500"}`}
-									style={{ width: `${pct}%` }}
-									title={`${type}: ${count}`}
-								/>
-							);
-						})}
-					</div>
-				)}
-
-				{/* Legend */}
-				<div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-					{MEMORY_TYPES.map((type) => {
-						const count = counts[type] ?? 0;
-						if (count === 0) return null;
-						return (
-							<div key={type} className="flex items-center gap-1.5 text-tiny">
-								<div className={`h-2 w-2 rounded-full ${MEMORY_TYPE_COLORS[type] ?? "bg-gray-500"}`} />
-								<span className="text-ink-dull">{type}</span>
-								<span className="tabular-nums text-ink-faint">{count}</span>
-							</div>
-						);
-					})}
-				</div>
-			</div>
-		</section>
+		<div className="h-48">
+			<ResponsiveContainer width="100%" height="100%">
+				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+					<defs>
+						<linearGradient id="memoryGradient" x1="0" y1="0" x2="0" y2="1">
+							<stop offset="5%" stopColor={CHART_COLORS.accent} stopOpacity={0.4} />
+							<stop offset="95%" stopColor={CHART_COLORS.accent} stopOpacity={0.05} />
+						</linearGradient>
+					</defs>
+					<CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+					<XAxis
+						dataKey="date"
+						stroke={CHART_COLORS.axis}
+						tick={{ fill: CHART_COLORS.tick, fontSize: 11 }}
+						tickLine={false}
+						axisLine={{ stroke: CHART_COLORS.grid }}
+						minTickGap={30}
+					/>
+					<YAxis
+						stroke={CHART_COLORS.axis}
+						tick={{ fill: CHART_COLORS.tick, fontSize: 11 }}
+						tickLine={false}
+						axisLine={false}
+					/>
+					<Tooltip
+						contentStyle={{
+							backgroundColor: CHART_COLORS.tooltip.bg,
+							border: `1px solid ${CHART_COLORS.tooltip.border}`,
+							borderRadius: "6px",
+							fontSize: "12px",
+						}}
+						labelStyle={{ color: CHART_COLORS.tick }}
+						itemStyle={{ color: CHART_COLORS.tooltip.text }}
+						cursor={{ stroke: CHART_COLORS.axis }}
+					/>
+					<Area
+						type="monotone"
+						dataKey="total"
+						stroke={CHART_COLORS.accent}
+						strokeWidth={2}
+						fill="url(#memoryGradient)"
+						fillOpacity={1}
+					/>
+				</AreaChart>
+			</ResponsiveContainer>
+		</div>
 	);
 }
 
-// -- Model Routing --
+function ProcessActivityChart({ data }: { data: { date: string; branches: number; workers: number }[] }) {
+	if (data.length === 0) {
+		return <div className="h-48 flex items-center justify-center text-ink-faint text-sm">No activity</div>;
+	}
 
-function RoutingSection({ config }: { config: { routing: { channel: string; branch: string; worker: string; compactor: string; cortex: string } } }) {
-	const models = [
-		{ label: "Channel", model: config.routing.channel },
-		{ label: "Branch", model: config.routing.branch },
-		{ label: "Worker", model: config.routing.worker },
-		{ label: "Compactor", model: config.routing.compactor },
-		{ label: "Cortex", model: config.routing.cortex },
-	];
+	const chartData = data.map((d) => ({
+		date: new Date(d.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+		branches: d.branches,
+		workers: d.workers,
+	}));
 
 	return (
-		<section>
-			<SectionHeader title="Model Routing" />
-			<div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-				{models.map(({ label, model }) => (
-					<div key={label} className="flex items-center justify-between rounded-md bg-app-darkBox px-3 py-2">
-						<span className="text-tiny text-ink-faint">{label}</span>
-						<span className="truncate pl-2 text-sm text-ink-dull" title={model}>
-							{formatModelName(model)}
-						</span>
+		<div className="h-48">
+			<ResponsiveContainer width="100%" height="100%">
+				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+					<defs>
+						<linearGradient id="branchGradient" x1="0" y1="0" x2="0" y2="1">
+							<stop offset="5%" stopColor={CHART_COLORS.violet} stopOpacity={0.4} />
+							<stop offset="95%" stopColor={CHART_COLORS.violet} stopOpacity={0.05} />
+						</linearGradient>
+						<linearGradient id="workerGradient" x1="0" y1="0" x2="0" y2="1">
+							<stop offset="5%" stopColor={CHART_COLORS.amber} stopOpacity={0.4} />
+							<stop offset="95%" stopColor={CHART_COLORS.amber} stopOpacity={0.05} />
+						</linearGradient>
+					</defs>
+					<CartesianGrid stroke={CHART_COLORS.grid} strokeDasharray="3 3" vertical={false} />
+					<XAxis
+						dataKey="date"
+						stroke={CHART_COLORS.axis}
+						tick={{ fill: CHART_COLORS.tick, fontSize: 11 }}
+						tickLine={false}
+						axisLine={{ stroke: CHART_COLORS.grid }}
+						minTickGap={30}
+					/>
+					<YAxis
+						stroke={CHART_COLORS.axis}
+						tick={{ fill: CHART_COLORS.tick, fontSize: 11 }}
+						tickLine={false}
+						axisLine={false}
+					/>
+					<Tooltip
+						contentStyle={{
+							backgroundColor: CHART_COLORS.tooltip.bg,
+							border: `1px solid ${CHART_COLORS.tooltip.border}`,
+							borderRadius: "6px",
+							fontSize: "12px",
+						}}
+						labelStyle={{ color: CHART_COLORS.tick }}
+						itemStyle={{ color: CHART_COLORS.tooltip.text }}
+						cursor={{ stroke: CHART_COLORS.axis }}
+					/>
+					<Area
+						type="monotone"
+						dataKey="branches"
+						stroke={CHART_COLORS.violet}
+						strokeWidth={2}
+						fill="url(#branchGradient)"
+						fillOpacity={1}
+					/>
+					<Area
+						type="monotone"
+						dataKey="workers"
+						stroke={CHART_COLORS.amber}
+						strokeWidth={2}
+						fill="url(#workerGradient)"
+						fillOpacity={1}
+					/>
+				</AreaChart>
+			</ResponsiveContainer>
+		</div>
+	);
+}
+
+function ActivityHeatmap({ data }: { data: { day: number; hour: number; count: number }[] }) {
+	if (data.length === 0) {
+		return <div className="h-48 flex items-center justify-center text-ink-faint text-sm">No activity data</div>;
+	}
+
+	const maxCount = Math.max(...data.map((d) => d.count), 1);
+	const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+	// Create a 7x24 grid
+	const getCell = (day: number, hour: number) => {
+		const cell = data.find((d) => d.day === day && d.hour === hour);
+		return cell?.count ?? 0;
+	};
+
+	const getOpacity = (count: number) => {
+		if (count === 0) return 0.05;
+		return 0.2 + (count / maxCount) * 0.8;
+	};
+
+	return (
+		<div className="h-48 overflow-auto">
+			<div className="flex flex-col gap-1">
+				{/* Hour labels */}
+				<div className="flex gap-1">
+					<div className="w-8 flex-shrink-0" /> {/* Day label spacer */}
+					{Array.from({ length: 24 }, (_, h) => (
+						<div key={h} className="w-4 flex-shrink-0 text-center text-[10px] text-ink-faint">
+							{h % 6 === 0 ? h : ""}
+						</div>
+					))}
+				</div>
+				{/* Heatmap grid */}
+				{days.map((dayLabel, day) => (
+					<div key={day} className="flex items-center gap-1">
+						<div className="w-8 flex-shrink-0 text-[10px] text-ink-faint">{dayLabel}</div>
+						<div className="flex gap-1">
+							{Array.from({ length: 24 }, (_, hour) => {
+								const count = getCell(day, hour);
+								return (
+									<div
+										key={hour}
+										title={`${dayLabel} ${hour}:00 - ${count} messages`}
+										className="h-4 w-4 flex-shrink-0 rounded-sm bg-accent transition-opacity hover:ring-1 hover:ring-accent"
+										style={{ opacity: getOpacity(count) }}
+									/>
+								);
+							})}
+						</div>
 					</div>
 				))}
 			</div>
-		</section>
+		</div>
 	);
 }
 
-/** Shorten model IDs like "anthropic/claude-sonnet-4-20250514" to "claude-sonnet-4" */
-function formatModelName(model: string): string {
-	const name = model.includes("/") ? model.split("/").pop()! : model;
-	// Strip date suffixes like -20250514
-	return name.replace(/-\d{8}$/, "");
+function MemoryDonut({ counts }: { counts: Record<string, number> }) {
+	const data = MEMORY_TYPES.map((type, idx) => ({
+		name: type,
+		value: counts[type] ?? 0,
+		color: MEMORY_TYPE_COLORS[idx % MEMORY_TYPE_COLORS.length],
+	})).filter((d) => d.value > 0);
+
+	if (data.length === 0) {
+		return <div className="h-48 flex items-center justify-center text-ink-faint text-sm">No memories</div>;
+	}
+
+	return (
+		<div className="h-48">
+			<ResponsiveContainer width="100%" height="100%">
+				<PieChart>
+					<Pie
+						data={data}
+						dataKey="value"
+						nameKey="name"
+						cx="50%"
+						cy="50%"
+						innerRadius={50}
+						outerRadius={70}
+						paddingAngle={2}
+						stroke="none"
+					>
+						{data.map((entry, index) => (
+							<Cell key={`cell-${index}`} fill={entry.color} />
+						))}
+					</Pie>
+					<Tooltip
+						contentStyle={{
+							backgroundColor: CHART_COLORS.tooltip.bg,
+							border: `1px solid ${CHART_COLORS.tooltip.border}`,
+							borderRadius: "6px",
+							fontSize: "12px",
+						}}
+						itemStyle={{ color: CHART_COLORS.tooltip.text }}
+					/>
+				</PieChart>
+			</ResponsiveContainer>
+			<div className="flex flex-wrap gap-2 mt-2 justify-center">
+				{data.map((item) => (
+					<div key={item.name} className="flex items-center gap-1.5 text-tiny">
+						<div className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />
+						<span className="text-ink-faint">{item.name}</span>
+						<span className="tabular-nums text-ink-dull">{item.value}</span>
+					</div>
+				))}
+			</div>
+		</div>
+	);
 }
 
-// -- Identity Preview --
+// -- List Components --
+
+function ModelRoutingList({ config }: { config: { routing: { channel: string; branch: string; worker: string; compactor: string; cortex: string } } }) {
+	const models = [
+		{ label: "Channel", model: config.routing.channel, color: "text-green-400" },
+		{ label: "Branch", model: config.routing.branch, color: "text-violet-400" },
+		{ label: "Worker", model: config.routing.worker, color: "text-amber-400" },
+		{ label: "Compactor", model: config.routing.compactor, color: "text-blue-400" },
+		{ label: "Cortex", model: config.routing.cortex, color: "text-pink-400" },
+	];
+
+	return (
+		<div className="flex flex-col gap-2">
+			{models.map(({ label, model, color }) => (
+				<div key={label} className="flex items-center justify-between">
+					<span className="text-tiny text-ink-faint">{label}</span>
+					<span className={`text-sm ${color} truncate max-w-[140px]`} title={model}>
+						{formatModelName(model)}
+					</span>
+				</div>
+			))}
+		</div>
+	);
+}
+
+function StatRow({ label, value, truncate }: { label: string; value: string; truncate?: boolean }) {
+	return (
+		<div className="flex items-center justify-between">
+			<span className="text-tiny text-ink-faint">{label}</span>
+			<span className={`text-sm text-ink-dull ${truncate ? "truncate max-w-[200px]" : ""}`} title={value}>
+				{value}
+			</span>
+		</div>
+	);
+}
+
+function formatModelName(model: string): string {
+	const name = model.includes("/") ? model.split("/").pop()! : model;
+	return name.replace(/-\d{8}$/, "").replace(/claude-/, "claude-").replace(/-202[0-9]+/, "");
+}
+
+// -- Other Sections --
 
 function IdentitySection({
 	agentId,
@@ -395,24 +620,22 @@ function IdentitySection({
 	if (files.length === 0) return null;
 
 	return (
-		<section>
-			<SectionHeader
-				title="Identity"
-				action={
-					<Link
-						to="/agents/$agentId/config"
-						params={{ agentId }}
-						className="text-tiny text-accent hover:text-accent/80"
-					>
-						Edit
-					</Link>
-				}
-			/>
-			<div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+		<section className="mt-6">
+			<div className="mb-3 flex items-center justify-between">
+				<h3 className="font-plex text-sm font-medium text-ink-dull">Identity</h3>
+				<Link
+					to="/agents/$agentId/config"
+					params={{ agentId }}
+					className="text-tiny text-accent hover:text-accent/80"
+				>
+					Edit
+				</Link>
+			</div>
+			<div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
 				{files.map(({ label, content }) => (
-					<div key={label} className="rounded-md bg-app-darkBox p-3">
+					<div key={label} className="rounded-xl bg-app-darkBox p-4">
 						<span className="text-tiny font-medium text-ink-faint">{label}</span>
-						<p className="mt-1 line-clamp-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
+						<p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
 							{content!.trim()}
 						</p>
 					</div>
@@ -422,28 +645,24 @@ function IdentitySection({
 	);
 }
 
-// -- Cron Jobs --
-
 function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }) {
 	return (
-		<section>
-			<SectionHeader
-				title="Cron Jobs"
-				action={
-					<Link
-						to="/agents/$agentId/cron"
-						params={{ agentId }}
-						className="text-tiny text-accent hover:text-accent/80"
-					>
-						Manage
-					</Link>
-				}
-			/>
-			<div className="mt-3 flex flex-col gap-1.5">
+		<section className="mt-6">
+			<div className="mb-3 flex items-center justify-between">
+				<h3 className="font-plex text-sm font-medium text-ink-dull">Cron Jobs</h3>
+				<Link
+					to="/agents/$agentId/cron"
+					params={{ agentId }}
+					className="text-tiny text-accent hover:text-accent/80"
+				>
+					Manage
+				</Link>
+			</div>
+			<div className="flex flex-col gap-2">
 				{jobs.map((job) => (
 					<div
 						key={job.id}
-						className="flex items-center gap-3 rounded-md bg-app-darkBox px-3 py-2"
+						className="flex items-center gap-3 rounded-xl bg-app-darkBox px-4 py-3"
 					>
 						<div
 							className={`h-2 w-2 rounded-full ${job.enabled ? "bg-green-500" : "bg-gray-500"}`}
@@ -468,62 +687,6 @@ function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }
 	);
 }
 
-// -- Cortex Status --
-
-function CortexStatusSection({
-	agentId,
-	lastBulletinAt,
-	recentEvents,
-}: {
-	agentId: string;
-	lastBulletinAt: string | null;
-	recentEvents: CortexEvent[];
-}) {
-	return (
-		<section>
-			<SectionHeader
-				title="Cortex"
-				action={
-					<Link
-						to="/agents/$agentId/cortex"
-						params={{ agentId }}
-						className="text-tiny text-accent hover:text-accent/80"
-					>
-						View all events
-					</Link>
-				}
-			/>
-			<div className="mt-3 rounded-md bg-app-darkBox p-3">
-				<div className="flex items-center gap-4">
-					<div>
-						<span className="text-tiny text-ink-faint">Last Bulletin</span>
-						<p className="mt-0.5 text-sm text-ink-dull">
-							{lastBulletinAt ? formatTimeAgo(lastBulletinAt) : "No bulletins yet"}
-						</p>
-					</div>
-				</div>
-
-				{recentEvents.length > 0 && (
-					<div className="mt-3 border-t border-app-line/50 pt-3">
-						<span className="text-tiny text-ink-faint">Recent Events</span>
-						<div className="mt-1.5 flex flex-col gap-1">
-							{recentEvents.map((event) => (
-								<div key={event.id} className="flex items-center gap-2 text-sm">
-									<CortexEventBadge type={event.event_type} />
-									<span className="min-w-0 flex-1 truncate text-ink-dull">{event.summary}</span>
-									<span className="flex-shrink-0 text-tiny tabular-nums text-ink-faint">
-										{formatTimeAgo(event.created_at)}
-									</span>
-								</div>
-							))}
-						</div>
-					</div>
-				)}
-			</div>
-		</section>
-	);
-}
-
 const CORTEX_EVENT_COLORS: Record<string, string> = {
 	bulletin_generated: "bg-green-500/20 text-green-400",
 	bulletin_failed: "bg-red-500/20 text-red-400",
@@ -540,6 +703,51 @@ const CORTEX_EVENT_COLORS: Record<string, string> = {
 	health_check: "bg-gray-500/20 text-gray-400",
 };
 
+function CortexEventsSection({
+	agentId,
+	events,
+	lastBulletinAt,
+}: {
+	agentId: string;
+	events: CortexEvent[];
+	lastBulletinAt: string | null;
+}) {
+	return (
+		<section className="mt-6">
+			<div className="mb-3 flex items-center justify-between">
+				<h3 className="font-plex text-sm font-medium text-ink-dull">Recent Cortex Events</h3>
+				<div className="flex items-center gap-4">
+					{lastBulletinAt && (
+						<span className="text-tiny text-ink-faint">
+							Bulletin {formatTimeAgo(lastBulletinAt)}
+						</span>
+					)}
+					<Link
+						to="/agents/$agentId/cortex"
+						params={{ agentId }}
+						className="text-tiny text-accent hover:text-accent/80"
+					>
+						View all
+					</Link>
+				</div>
+			</div>
+			<div className="rounded-xl bg-app-darkBox p-4">
+				<div className="flex flex-col gap-2">
+					{events.map((event) => (
+						<div key={event.id} className="flex items-center gap-3 text-sm">
+							<CortexEventBadge type={event.event_type} />
+							<span className="min-w-0 flex-1 truncate text-ink-dull">{event.summary}</span>
+							<span className="flex-shrink-0 text-tiny tabular-nums text-ink-faint">
+								{formatTimeAgo(event.created_at)}
+							</span>
+						</div>
+					))}
+				</div>
+			</div>
+		</section>
+	);
+}
+
 function CortexEventBadge({ type }: { type: string }) {
 	const color = CORTEX_EVENT_COLORS[type] ?? "bg-gray-500/20 text-gray-400";
 	const label = type.replace(/_/g, " ");
@@ -547,30 +755,5 @@ function CortexEventBadge({ type }: { type: string }) {
 		<span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-tiny ${color}`}>
 			{label}
 		</span>
-	);
-}
-
-// -- Configuration --
-
-function ConfigSection({ agent }: { agent: { workspace: string; context_window: number; max_turns: number; max_concurrent_branches: number } }) {
-	return (
-		<section>
-			<SectionHeader title="Configuration" />
-			<div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-				<ConfigItem label="Workspace" value={agent.workspace} />
-				<ConfigItem label="Context Window" value={agent.context_window.toLocaleString()} />
-				<ConfigItem label="Max Turns" value={String(agent.max_turns)} />
-				<ConfigItem label="Max Branches" value={String(agent.max_concurrent_branches)} />
-			</div>
-		</section>
-	);
-}
-
-function ConfigItem({ label, value }: { label: string; value: string }) {
-	return (
-		<div className="rounded-md bg-app-darkBox px-3 py-2">
-			<span className="text-tiny text-ink-faint">{label}</span>
-			<p className="mt-0.5 truncate text-sm text-ink-dull" title={value}>{value}</p>
-		</div>
 	);
 }

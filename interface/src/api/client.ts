@@ -217,6 +217,10 @@ export interface AgentOverviewResponse {
 	cron_jobs: CronJobInfo[];
 	last_bulletin_at: string | null;
 	recent_cortex_events: CortexEvent[];
+	memory_daily: { date: string; count: number }[];
+	activity_daily: { date: string; branches: number; workers: number }[];
+	activity_heatmap: { day: number; hour: number; count: number }[];
+	latest_bulletin: string | null;
 }
 
 export type MemoryType =

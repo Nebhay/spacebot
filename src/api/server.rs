@@ -84,6 +84,34 @@ struct AgentOverviewResponse {
     last_bulletin_at: Option<String>,
     /// Recent cortex events (last 5).
     recent_cortex_events: Vec<CortexEvent>,
+    /// Daily memory creation counts for the last 30 days.
+    memory_daily: Vec<DayCount>,
+    /// Daily activity counts (branches, workers) for the last 30 days.
+    activity_daily: Vec<ActivityDayCount>,
+    /// Activity heatmap: messages per day-of-week/hour.
+    activity_heatmap: Vec<HeatmapCell>,
+    /// Latest cortex bulletin text, if any.
+    latest_bulletin: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DayCount {
+    date: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct ActivityDayCount {
+    date: String,
+    branches: i64,
+    workers: i64,
+}
+
+#[derive(Serialize)]
+struct HeatmapCell {
+    day: i64,
+    hour: i64,
+    count: i64,
 }
 
 #[derive(Serialize)]
@@ -452,6 +480,82 @@ async fn agent_overview(
         .await
         .unwrap_or_default();
 
+    // Latest bulletin text
+    let latest_bulletin = bulletin_events.first().and_then(|e| {
+        e.details.as_ref().and_then(|d| {
+            d.get("bulletin_text").and_then(|v| v.as_str().map(|s| s.to_string()))
+        })
+    });
+
+    // Memory daily counts for last 30 days
+    let memory_daily_rows = sqlx::query(
+        "SELECT date(created_at) as date, COUNT(*) as count FROM memories WHERE forgotten = 0 AND created_at > date('now', '-30 days') GROUP BY date ORDER BY date",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let memory_daily: Vec<DayCount> = memory_daily_rows
+        .into_iter()
+        .map(|row| DayCount {
+            date: row.get("date"),
+            count: row.get("count"),
+        })
+        .collect();
+
+    // Activity daily counts (branches + workers) for last 30 days
+    let activity_window = chrono::Utc::now() - chrono::Duration::days(30);
+
+    let branch_activity = sqlx::query(
+        "SELECT date(started_at) as date, COUNT(*) as count FROM branch_runs WHERE started_at > ? GROUP BY date ORDER BY date",
+    )
+    .bind(activity_window.to_rfc3339())
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let worker_activity = sqlx::query(
+        "SELECT date(started_at) as date, COUNT(*) as count FROM worker_runs WHERE started_at > ? GROUP BY date ORDER BY date",
+    )
+    .bind(activity_window.to_rfc3339())
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let activity_daily: Vec<ActivityDayCount> = {
+        let mut map: HashMap<String, ActivityDayCount> = HashMap::new();
+        for row in branch_activity {
+            let date: String = row.get("date");
+            let count: i64 = row.get("count");
+            map.entry(date.clone()).or_insert_with(|| ActivityDayCount { date, branches: 0, workers: 0 }).branches = count;
+        }
+        for row in worker_activity {
+            let date: String = row.get("date");
+            let count: i64 = row.get("count");
+            map.entry(date.clone()).or_insert_with(|| ActivityDayCount { date, branches: 0, workers: 0 }).workers = count;
+        }
+        let mut days: Vec<_> = map.into_values().collect();
+        days.sort_by(|a, b| a.date.cmp(&b.date));
+        days
+    };
+
+    // Activity heatmap: messages per day-of-week/hour
+    let heatmap_rows = sqlx::query(
+        "SELECT CAST(strftime('%w', created_at) AS INTEGER) as day, CAST(strftime('%H', created_at) AS INTEGER) as hour, COUNT(*) as count FROM conversation_messages WHERE created_at > date('now', '-90 days') GROUP BY day, hour",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let activity_heatmap: Vec<HeatmapCell> = heatmap_rows
+        .into_iter()
+        .map(|row| HeatmapCell {
+            day: row.get("day"),
+            hour: row.get("hour"),
+            count: row.get("count"),
+        })
+        .collect();
+
     Ok(Json(AgentOverviewResponse {
         memory_counts,
         memory_total,
@@ -459,6 +563,10 @@ async fn agent_overview(
         cron_jobs,
         last_bulletin_at,
         recent_cortex_events,
+        memory_daily,
+        activity_daily,
+        activity_heatmap,
+        latest_bulletin,
     }))
 }
 
