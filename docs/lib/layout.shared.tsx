@@ -1,9 +1,9 @@
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 
-// fill this with your actual GitHub info, for example:
+// Spacebot GitHub repository
 export const gitConfig = {
-  user: 'fuma-nama',
-  repo: 'fumadocs',
+  user: 'spacedriveapp',
+  repo: 'spacebot',
   branch: 'main',
 };
 

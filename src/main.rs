@@ -314,6 +314,7 @@ async fn run(
     let mut _cortex_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let bindings: Arc<ArcSwap<Vec<spacebot::config::Binding>>> =
         Arc::new(ArcSwap::from_pointee(config.bindings.clone()));
+    api_state.set_bindings(bindings.clone()).await;
     let default_agent_id = config.default_agent_id().to_string();
 
     // Set the config path on the API state for config.toml writes
@@ -857,6 +858,8 @@ async fn initialize_agents(
         api_state.set_discord_permissions(perms.clone()).await;
     }
 
+
+
     if let Some(discord_config) = &config.messaging.discord {
         if discord_config.enabled {
             let adapter = spacebot::messaging::discord::DiscordAdapter::new(
@@ -872,6 +875,9 @@ async fn initialize_agents(
         let perms = spacebot::config::SlackPermissions::from_config(slack_config, &config.bindings);
         Arc::new(ArcSwap::from_pointee(perms))
     });
+    if let Some(perms) = &*slack_permissions {
+        api_state.set_slack_permissions(perms.clone()).await;
+    }
 
     if let Some(slack_config) = &config.messaging.slack {
         if slack_config.enabled {

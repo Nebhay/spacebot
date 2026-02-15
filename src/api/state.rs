@@ -3,7 +3,7 @@
 use crate::agent::channel::ChannelState;
 use crate::agent::cortex_chat::CortexChatSession;
 use crate::agent::status::StatusBlock;
-use crate::config::{DiscordPermissions, RuntimeConfig};
+use crate::config::{Binding, DiscordPermissions, RuntimeConfig, SlackPermissions};
 use crate::cron::{CronStore, Scheduler};
 use crate::memory::MemorySearch;
 use crate::{ProcessEvent, ProcessId};
@@ -58,6 +58,10 @@ pub struct ApiState {
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
+    /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
+    pub slack_permissions: RwLock<Option<Arc<ArcSwap<SlackPermissions>>>>,
+    /// Shared reference to the bindings ArcSwap (same instance used by the main loop and file watcher).
+    pub bindings: RwLock<Option<Arc<ArcSwap<Vec<Binding>>>>>,
     /// Sender to signal the main event loop that provider keys have been configured.
     pub provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
 }
@@ -156,6 +160,8 @@ impl ApiState {
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             discord_permissions: RwLock::new(None),
+            slack_permissions: RwLock::new(None),
+            bindings: RwLock::new(None),
             provider_setup_tx,
         }
     }
@@ -325,6 +331,16 @@ impl ApiState {
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.
     pub async fn set_discord_permissions(&self, permissions: Arc<ArcSwap<DiscordPermissions>>) {
         *self.discord_permissions.write().await = Some(permissions);
+    }
+
+    /// Share the Slack permissions ArcSwap with the API so reads get hot-reloaded values.
+    pub async fn set_slack_permissions(&self, permissions: Arc<ArcSwap<SlackPermissions>>) {
+        *self.slack_permissions.write().await = Some(permissions);
+    }
+
+    /// Share the bindings ArcSwap with the API so reads get hot-reloaded values.
+    pub async fn set_bindings(&self, bindings: Arc<ArcSwap<Vec<Binding>>>) {
+        *self.bindings.write().await = Some(bindings);
     }
 }
 
